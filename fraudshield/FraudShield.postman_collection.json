@@ -1,0 +1,206 @@
+{
+  "info": {
+    "name": "FraudShield API",
+    "description": "Complete Postman collection for testing FraudShield microservices.\n\nSet the `base_url` variable to:\n- Local:  http://localhost:8003\n- AWS:    http://<EC2-PUBLIC-IP>:30003",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8003",
+      "type": "string"
+    },
+    {
+      "key": "fraud_url",
+      "value": "http://localhost:8004",
+      "type": "string"
+    },
+    {
+      "key": "transaction_id",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health Checks",
+      "item": [
+        {
+          "name": "Transaction Service — Health",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/health",
+            "description": "Verify the Transaction Service is running."
+          }
+        },
+        {
+          "name": "Fraud Detection — Health",
+          "request": {
+            "method": "GET",
+            "url": "{{fraud_url}}/health",
+            "description": "Verify the Fraud Detection Service is running."
+          }
+        },
+        {
+          "name": "Fraud Detection — Deep Health",
+          "request": {
+            "method": "GET",
+            "url": "{{fraud_url}}/health/deep",
+            "description": "Checks Redis and PostgreSQL connectivity inside Fraud Detection."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Transactions",
+      "item": [
+        {
+          "name": "1. Initiate — Normal Transaction (expect PASS)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status is 202', () => pm.response.to.have.status(202));",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('transaction_id', json.id);",
+                  "pm.test('Status is PENDING', () => pm.expect(json.status).to.eql('PENDING'));",
+                  "console.log('Saved transaction_id:', json.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/transactions/",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"user_demo_001\",\n  \"merchant_id\": \"amazon_india\",\n  \"amount\": 1500.00,\n  \"currency\": \"INR\"\n}"
+            },
+            "description": "Normal transaction — amount is within range, merchant is known. Expected verdict: PASS."
+          }
+        },
+        {
+          "name": "2. Get Transaction Status (poll after 3s)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('Transaction has a verdict', () => pm.expect(json.fraud_verdict).to.not.be.null);",
+                  "console.log('Final status:', json.status, '| Verdict:', json.fraud_verdict, '| Score:', json.fraud_score);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/transactions/{{transaction_id}}",
+            "description": "Wait ~2-3 seconds after initiating, then poll this. Status should have changed from PENDING."
+          }
+        },
+        {
+          "name": "3. Initiate — High Amount Transaction (expect REVIEW or BLOCK)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status is 202', () => pm.response.to.have.status(202));",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('transaction_id', json.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/transactions/",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"user_demo_001\",\n  \"merchant_id\": \"new_merchant_99\",\n  \"amount\": 85000.00,\n  \"currency\": \"INR\"\n}"
+            },
+            "description": "Very high amount to a new merchant — should trigger high-amount + new-merchant rules. Expected: REVIEW or BLOCK."
+          }
+        },
+        {
+          "name": "4. Initiate — Blacklisted Merchant (expect BLOCK)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status is 202', () => pm.response.to.have.status(202));",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('transaction_id', json.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/transactions/",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"user_demo_002\",\n  \"merchant_id\": \"fraud_merchant_blacklisted\",\n  \"amount\": 500.00,\n  \"currency\": \"INR\"\n}"
+            },
+            "description": "Merchant is on the blacklist — instant BLOCK regardless of amount."
+          }
+        },
+        {
+          "name": "5. Velocity Test — Fire 6 rapid transactions",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "// Run this request 6 times manually to trigger velocity rule",
+                  "console.log('Send this request 6+ times within 10 minutes to trigger velocity rule');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/transactions/",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"user_velocity_test\",\n  \"merchant_id\": \"merchant_normal\",\n  \"amount\": 200.00,\n  \"currency\": \"INR\"\n}"
+            },
+            "description": "Send this request 6+ times within 10 minutes. After 5 transactions, velocity rule triggers. Use Postman Runner to automate."
+          }
+        },
+        {
+          "name": "6. List User Transactions",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/transactions/user/user_demo_001?page=1&page_size=10",
+              "host": ["{{base_url}}"],
+              "path": ["transactions", "user", "user_demo_001"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "page_size", "value": "10" }
+              ]
+            },
+            "description": "Paginated transaction history for user_demo_001."
+          }
+        }
+      ]
+    }
+  ]
+}

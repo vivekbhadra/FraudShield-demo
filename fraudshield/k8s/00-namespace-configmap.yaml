@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fraudshield
+  labels:
+    app: fraudshield
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fraudshield-config
+  namespace: fraudshield
+data:
+  kafka-broker: "kafka-service:9092"
+  topic-transaction-initiated: "transactions.initiated"
+  topic-fraud-verdict: "fraud.verdict"
+  topic-audit-events: "audit.events"

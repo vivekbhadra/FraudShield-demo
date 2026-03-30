@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fraud-detection-service
+  namespace: fraudshield
+  labels:
+    app: fraud-detection-service
+    version: "1.0.0"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: fraud-detection-service
+  template:
+    metadata:
+      labels:
+        app: fraud-detection-service
+    spec:
+      containers:
+        - name: fraud-detection-service
+          image: fraudshield-fraud-detection-service:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8004
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: fraudshield-secrets
+                  key: fraud-db-url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: fraudshield-secrets
+                  key: redis-url
+            - name: KAFKA_BROKER
+              valueFrom:
+                configMapKeyRef:
+                  name: fraudshield-config
+                  key: kafka-broker
+            - name: TOPIC_TRANSACTION_INITIATED
+              valueFrom:
+                configMapKeyRef:
+                  name: fraudshield-config
+                  key: topic-transaction-initiated
+            - name: TOPIC_FRAUD_VERDICT
+              valueFrom:
+                configMapKeyRef:
+                  name: fraudshield-config
+                  key: topic-fraud-verdict
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8004
+            initialDelaySeconds: 15
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8004
+            initialDelaySeconds: 25
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "200m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fraud-detection-service
+  namespace: fraudshield
+spec:
+  selector:
+    app: fraud-detection-service
+  ports:
+    - protocol: TCP
+      port: 8004
+      targetPort: 8004
+  type: ClusterIP
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: fraud-detection-hpa
+  namespace: fraudshield
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: fraud-detection-service
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60

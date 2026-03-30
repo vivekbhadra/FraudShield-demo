@@ -1,0 +1,222 @@
+# ── PostgreSQL — Transactions DB ──────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-transactions-pvc
+  namespace: fraudshield
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-transactions
+  namespace: fraudshield
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-transactions
+  template:
+    metadata:
+      labels:
+        app: postgres-transactions
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: fraudshield
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fraudshield-secrets
+                  key: postgres-password
+            - name: POSTGRES_DB
+              value: transactions_db
+          volumeMounts:
+            - name: postgres-transactions-storage
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "300m"
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "fraudshield", "-d", "transactions_db"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        - name: postgres-transactions-storage
+          persistentVolumeClaim:
+            claimName: postgres-transactions-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-transactions
+  namespace: fraudshield
+spec:
+  selector:
+    app: postgres-transactions
+  ports:
+    - port: 5432
+      targetPort: 5432
+  type: ClusterIP
+---
+# ── PostgreSQL — Fraud DB ──────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-fraud-pvc
+  namespace: fraudshield
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-fraud
+  namespace: fraudshield
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-fraud
+  template:
+    metadata:
+      labels:
+        app: postgres-fraud
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: fraudshield
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fraudshield-secrets
+                  key: postgres-password
+            - name: POSTGRES_DB
+              value: fraud_db
+          volumeMounts:
+            - name: postgres-fraud-storage
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "300m"
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "fraudshield", "-d", "fraud_db"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        - name: postgres-fraud-storage
+          persistentVolumeClaim:
+            claimName: postgres-fraud-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-fraud
+  namespace: fraudshield
+spec:
+  selector:
+    app: postgres-fraud
+  ports:
+    - port: 5432
+      targetPort: 5432
+  type: ClusterIP
+---
+# ── Redis ──────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-pvc
+  namespace: fraudshield
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: fraudshield
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.2-alpine
+          ports:
+            - containerPort: 6379
+          command:
+            - redis-server
+            - "--appendonly"
+            - "yes"
+            - "--maxmemory"
+            - "256mb"
+            - "--maxmemory-policy"
+            - "allkeys-lru"
+          volumeMounts:
+            - name: redis-storage
+              mountPath: /data
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: redis-storage
+          persistentVolumeClaim:
+            claimName: redis-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: fraudshield
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+  type: ClusterIP
