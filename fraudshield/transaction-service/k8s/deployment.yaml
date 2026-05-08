@@ -18,8 +18,8 @@ spec:
     spec:
       containers:
         - name: transaction-service
-          image: fraudshield-transaction-service:1.0.0
-          imagePullPolicy: IfNotPresent
+          image: fraudshield-transaction:1.0.0
+          imagePullPolicy: Never
           ports:
             - containerPort: 8003
           env:
