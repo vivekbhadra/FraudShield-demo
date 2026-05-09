@@ -93,12 +93,22 @@ fail_fast_if_crashing() {
         return 0
     fi
 
-    local newest_status
-    newest_status=$(kubectl get pod "${newest_pod}" -n "${ns}" \
+    local waiting_reason
+    waiting_reason=$(kubectl get pod "${newest_pod}" -n "${ns}" \
         -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null || true)
 
-    case "${newest_status}" in
-        CrashLoopBackOff|Error|ImagePullBackOff|ErrImagePull)
+    local terminated_reason
+    terminated_reason=$(kubectl get pod "${newest_pod}" -n "${ns}" \
+        -o jsonpath='{.status.containerStatuses[0].state.terminated.reason}' 2>/dev/null || true)
+
+    case "${waiting_reason}" in
+        CrashLoopBackOff|ImagePullBackOff|ErrImagePull)
+            print_pod_logs_and_exit "${app}" "${ns}"
+            ;;
+    esac
+
+    case "${terminated_reason}" in
+        Error|OOMKilled)
             print_pod_logs_and_exit "${app}" "${ns}"
             ;;
     esac
