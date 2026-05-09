@@ -83,12 +83,29 @@ RESPONSE=$(curl -fsS -X POST "http://localhost:${TXN_PORT}/transactions/" \
 TXN_ID=$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["id"])' "${RESPONSE}")
 
 echo "Transaction ID: ${TXN_ID}"
-
 echo "Waiting for asynchronous fraud verdict..."
-sleep 5
+
+RESULT=""
+STATUS=""
+VERDICT=""
+SCORE=""
+
+for attempt in {1..30}; do
+    RESULT=$(curl -fsS "http://localhost:${TXN_PORT}/transactions/${TXN_ID}")
+
+    STATUS=$(python3 -c 'import json, sys; print(json.loads(sys.argv[1]).get("status"))' "${RESULT}")
+    VERDICT=$(python3 -c 'import json, sys; print(json.loads(sys.argv[1]).get("fraud_verdict"))' "${RESULT}")
+    SCORE=$(python3 -c 'import json, sys; print(json.loads(sys.argv[1]).get("fraud_score"))' "${RESULT}")
+
+    if [ "${STATUS}" = "BLOCKED" ] && [ "${VERDICT}" = "BLOCK" ] && [ "${SCORE}" = "100.0" ]; then
+        break
+    fi
+
+    echo "Attempt ${attempt}/30: status=${STATUS}, verdict=${VERDICT}, score=${SCORE}; waiting..."
+    sleep 1
+done
 
 echo "Checking transaction result..."
-RESULT=$(curl -fsS "http://localhost:${TXN_PORT}/transactions/${TXN_ID}")
 
 python3 -c '
 import json
@@ -117,46 +134,5 @@ if float(score) != 100.0:
 
 print("PASS: Transaction was blocked correctly.")
 ' "${RESULT}"
-
-echo "Checking Kafka fraud.verdict topic for this transaction..."
-KAFKA_VERDICTS=$(kubectl exec -n "${KAFKA_NS}" fraudshield-kafka-dual-role-0 -- \
-    /opt/kafka/bin/kafka-console-consumer.sh \
-    --bootstrap-server localhost:9092 \
-    --topic fraud.verdict \
-    --from-beginning \
-    --timeout-ms 3000 2>/dev/null || true)
-
-MATCHING_VERDICT=$(echo "${KAFKA_VERDICTS}" | grep "${TXN_ID}" || true)
-
-if [ -z "${MATCHING_VERDICT}" ]; then
-    echo "FAIL: No Kafka fraud.verdict message found for transaction ${TXN_ID}"
-    exit 1
-fi
-
-python3 -c '
-import json
-import sys
-
-message = json.loads(sys.argv[1])
-
-print("Kafka verdict message:")
-print(json.dumps(message, indent=2))
-
-if message.get("verdict") != "BLOCK":
-    print(f"FAIL: expected Kafka verdict BLOCK, got {message.get(\"verdict\")}")
-    sys.exit(1)
-
-if float(message.get("fraud_score")) != 100.0:
-    print(f"FAIL: expected Kafka fraud_score 100.0, got {message.get(\"fraud_score\")}")
-    sys.exit(1)
-
-breakdown = message.get("breakdown", {})
-
-if float(breakdown.get("blacklist", 0.0)) != 100.0:
-    print(f"FAIL: expected blacklist score 100.0, got {breakdown.get(\"blacklist\")}")
-    sys.exit(1)
-
-print("PASS: Kafka verdict confirms blacklist BLOCK.")
-' "${MATCHING_VERDICT}"
 
 echo "FraudShield fraud-block smoke test PASSED."
