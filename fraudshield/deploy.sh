@@ -153,6 +153,128 @@ wait_for_deployment() {
     done
 }
 
+wait_for_deployment_soft() {
+    local app="$1"
+    local ns="$2"
+    local timeout="$3"
+    local elapsed=0
+    local interval=5
+
+    info "Waiting for ${app} in namespace ${ns} for up to ${timeout}s..."
+
+    while true; do
+        local ready total
+        ready=$(kubectl get deployment "${app}" -n "${ns}" \
+            -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+        total=$(kubectl get deployment "${app}" -n "${ns}" \
+            -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "?")
+
+        ready="${ready:-0}"
+
+        if [[ "${ready}" == "${total}" && "${total}" != "0" && "${total}" != "?" ]]; then
+            success "${app} ready (${ready}/${total} pods)."
+            return 0
+        fi
+
+        warn "${app}: ${ready}/${total} ready."
+
+        kubectl get pods -n "${ns}" -l "app=${app}" --no-headers 2>/dev/null \
+            | awk '{print $1, $2, $3, $4}' || true
+
+        if (( elapsed >= timeout )); then
+            return 1
+        fi
+
+        sleep "${interval}"
+        elapsed=$((elapsed + interval))
+    done
+}
+
+patch_postgres_recreate_strategy() {
+    local deployment="$1"
+
+    info "Ensuring ${deployment} uses Recreate deployment strategy..."
+
+    kubectl -n "${NS}" patch deployment "${deployment}" \
+        --type='json' \
+        -p='[
+            {"op":"replace","path":"/spec/strategy","value":{"type":"Recreate"}}
+        ]' >/dev/null
+
+    success "${deployment} uses Recreate deployment strategy."
+}
+
+postgres_logs_contain_corruption() {
+    local deployment="$1"
+    local pod
+    local logs
+
+    pod=$(kubectl get pods -n "${NS}" -l "app=${deployment}" \
+        --sort-by=.metadata.creationTimestamp \
+        -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null || true)
+
+    if [[ -z "${pod}" ]]; then
+        return 1
+    fi
+
+    logs="$(
+        kubectl logs -n "${NS}" "${pod}" --previous --tail=200 2>/dev/null || true
+        kubectl logs -n "${NS}" "${pod}" --tail=200 2>/dev/null || true
+    )"
+
+    grep -Eqi \
+        'checkpoint request failed|xlog flush request|request to flush past end of generated WAL|database system is shut down' \
+        <<< "${logs}"
+}
+
+recover_local_postgres_pvc() {
+    local deployment="$1"
+    local pvc="$2"
+
+    warn "PostgreSQL corruption detected for ${deployment}."
+    warn "This is a local Minikube environment. Recreating PVC ${pvc}."
+
+    info "Scaling ${deployment} to zero..."
+    kubectl -n "${NS}" scale deployment "${deployment}" --replicas=0
+
+    info "Scaling old ReplicaSets for ${deployment} to zero..."
+    kubectl -n "${NS}" scale rs -l "app=${deployment}" --replicas=0 || true
+
+    info "Deleting existing ${deployment} pods..."
+    kubectl -n "${NS}" delete pod -l "app=${deployment}" --force --grace-period=0 2>/dev/null || true
+
+    info "Deleting corrupted PVC ${pvc}..."
+    kubectl -n "${NS}" delete pvc "${pvc}" --ignore-not-found=true
+
+    info "Re-applying database manifests to recreate PVC..."
+    kubectl apply -f "${MANIFESTS_DIR}/03-databases.yaml"
+
+    patch_postgres_recreate_strategy "${deployment}"
+
+    info "Starting ${deployment} with fresh local PVC..."
+    kubectl -n "${NS}" scale deployment "${deployment}" --replicas=1
+
+    wait_for_deployment "${deployment}" "${NS}" "${WAIT_TIMEOUT}"
+
+    success "${deployment} recovered successfully."
+}
+
+wait_for_postgres_with_recovery() {
+    local deployment="$1"
+    local pvc="$2"
+
+    if wait_for_deployment_soft "${deployment}" "${NS}" "${WAIT_TIMEOUT}"; then
+        return 0
+    fi
+
+    if postgres_logs_contain_corruption "${deployment}"; then
+        recover_local_postgres_pvc "${deployment}" "${pvc}"
+        return 0
+    fi
+
+    print_pod_logs_and_exit "${deployment}" "${NS}"
+}
+
 ensure_postgres_database() {
     local deployment="$1"
     local service="$2"
@@ -194,6 +316,10 @@ else
     success "Minikube is running."
 fi
 
+eval "$(minikube docker-env)"
+kubectl config use-context minikube >/dev/null
+success "kubectl context set to minikube."
+
 require_path "${FRAUDSHIELD_DIR}"
 require_path "${TXN_BUILD_CTX}/Dockerfile"
 require_path "${FRAUD_BUILD_CTX}/Dockerfile"
@@ -206,8 +332,6 @@ require_path "${TXN_K8S_DIR}/service.yaml"
 require_path "${FRAUD_K8S_FILE}"
 
 header "Build Images inside Minikube"
-
-eval "$(minikube docker-env)"
 
 info "Building ${TXN_IMAGE}..."
 docker build -t "${TXN_IMAGE}" "${TXN_BUILD_CTX}"
@@ -256,13 +380,16 @@ header "Deploy Infrastructure"
 kubectl apply -f "${MANIFESTS_DIR}/02-kafka.yaml"
 kubectl apply -f "${MANIFESTS_DIR}/03-databases.yaml"
 
+patch_postgres_recreate_strategy "postgres-transactions"
+patch_postgres_recreate_strategy "postgres-fraud"
+
 kubectl rollout status deployment/zookeeper -n "${NS}" --timeout="${ROLLOUT_TIMEOUT}"
 kubectl rollout status deployment/kafka -n "${NS}" --timeout="${ROLLOUT_TIMEOUT}"
 
-wait_for_deployment postgres-transactions "${NS}" "${WAIT_TIMEOUT}"
+wait_for_postgres_with_recovery "postgres-transactions" "postgres-transactions-pvc"
 ensure_postgres_database "postgres-transactions" "postgres-transactions" "transactions_db"
 
-wait_for_deployment postgres-fraud "${NS}" "${WAIT_TIMEOUT}"
+wait_for_postgres_with_recovery "postgres-fraud" "postgres-fraud-pvc"
 ensure_postgres_database "postgres-fraud" "postgres-fraud" "fraud_db"
 
 wait_for_deployment redis "${NS}" "${WAIT_TIMEOUT}"
@@ -281,7 +408,7 @@ info "Scaling app deployments to 1 replica..."
 kubectl scale deployment/transaction-service -n "${NS}" --replicas=1
 kubectl scale deployment/fraud-detection-service -n "${NS}" --replicas=1
 
-info "Restarting app deployments to reload latest Secret and ConfigMap values..."
+info "Restarting app deployments after infrastructure recovery..."
 kubectl rollout restart deployment/transaction-service -n "${NS}"
 kubectl rollout restart deployment/fraud-detection-service -n "${NS}"
 
@@ -293,12 +420,7 @@ wait_for_deployment fraud-detection-service "${NS}" "${WAIT_TIMEOUT}"
 header "Health Check through Trusted Port-Forward"
 
 warn "Do not test Kubernetes transaction-service through localhost:8003."
-warn "localhost:8003 may belong to a Docker-published local container."
-
-if command -v lsof >/dev/null 2>&1; then
-    info "Checking localhost:8003 ownership..."
-    sudo lsof -i :8003 || true
-fi
+warn "localhost:8003 may belong to a stale Docker or kubectl port-forward."
 
 if command -v lsof >/dev/null 2>&1; then
     info "Checking whether trusted local port ${LOCAL_TXN_PORT} is already in use..."
@@ -306,6 +428,12 @@ if command -v lsof >/dev/null 2>&1; then
         error "localhost:${LOCAL_TXN_PORT} is already in use."
         error "Stop the existing process or use another port."
         lsof -i :"${LOCAL_TXN_PORT}" || true
+        exit 1
+    fi
+else
+    if ss -ltn | awk '{print $4}' | grep -q ":${LOCAL_TXN_PORT}$"; then
+        error "localhost:${LOCAL_TXN_PORT} is already in use."
+        error "Stop the existing process or use another port."
         exit 1
     fi
 fi
@@ -392,6 +520,7 @@ echo -e "  kubectl get all -n ${NS}"
 echo -e "  kubectl logs -n ${NS} deployment/transaction-service -f"
 echo -e "  kubectl logs -n ${NS} deployment/fraud-detection-service -f"
 echo -e "  kubectl port-forward service/transaction-service 18003:8003 -n ${NS}"
+echo -e "  ./scripts/test_fraud_block.sh"
 echo -e "  minikube dashboard"
 
 echo ""
