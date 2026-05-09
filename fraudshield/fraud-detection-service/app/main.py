@@ -3,9 +3,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.db.session import engine, Base
-from app.cache.redis_client import init_redis, close_redis
+from app.db.session import engine, Base, SessionLocal
+from app.cache.redis_client import init_redis, close_redis, seed_blacklist
 from app.kafka.consumer import start_consumer, stop_consumer
+from app.models.fraud import MerchantBlacklist
 
 logging.basicConfig(
     level=logging.INFO,
@@ -17,13 +18,36 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting Fraud Detection Service...")
+
     # Create DB tables
     Base.metadata.create_all(bind=engine)
+
     # Warm up Redis connection pool
     await init_redis()
+
+    # ── Seed blacklist: Postgres → Redis ──────────────────────────────────
+    # Runs on every pod start so Redis always reflects the DB truth,
+    # even after a crash, OOM kill, or rolling restart wipes the cache.
+    try:
+        db = SessionLocal()
+        rows = (
+            db.query(MerchantBlacklist.merchant_id)
+            .filter(MerchantBlacklist.is_active == True)
+            .all()
+        )
+        db.close()
+        merchant_ids = [row.merchant_id for row in rows]
+        await seed_blacklist(merchant_ids)
+        logger.info(f"Blacklist sync complete: {len(merchant_ids)} active merchants.")
+    except Exception as e:
+        logger.error(f"Blacklist seed failed on startup: {e}", exc_info=True)
+    # ─────────────────────────────────────────────────────────────────────
+
     # Start Kafka consumer loop
     await start_consumer()
+
     yield
+
     logger.info("Shutting down Fraud Detection Service...")
     await stop_consumer()
     await close_redis()
@@ -75,4 +99,8 @@ async def deep_health_check():
         checks["postgres"] = f"error: {e}"
 
     all_ok = all(v == "ok" for v in checks.values())
-    return {"service": "fraud-detection-service", "status": "healthy" if all_ok else "degraded", **checks}
+    return {
+        "service": "fraud-detection-service",
+        "status": "healthy" if all_ok else "degraded",
+        **checks,
+    }

@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
         - name: fraud-detection-service
-          image: fraudshield-fraud-detection:1.0.0
+          image: fraudshield-fraud-detection:1.0.2
           imagePullPolicy: Never
           ports:
             - containerPort: 8004

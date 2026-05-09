@@ -59,6 +59,8 @@ async def score_transaction(event: TransactionEvent, db: Session) -> ScoringResu
 
     try:
         score_blacklist = await blacklist.evaluate(event.merchant_id)
+        logger.warning(f"DEBUG_BLACKLIST merchant={event.merchant_id} "
+                        f"score_blacklist={score_blacklist}")
     except Exception as e:
         logger.error(f"Blacklist rule failed: {e}", exc_info=True)
 
@@ -165,7 +167,11 @@ async def score_transaction(event: TransactionEvent, db: Session) -> ScoringResu
     except Exception as e:
         logger.error(f"Failed to persist fraud score: {e}", exc_info=True)
         db.rollback()
-
+        logger.warning(
+            f"DEBUG_FINAL txn={event.transaction_id} "
+            f"score={total_score} verdict={verdict} "
+            f"breakdown={breakdown.model_dump()}"
+        )
     return ScoringResult(
         transaction_id=event.transaction_id,
         user_id=event.user_id,

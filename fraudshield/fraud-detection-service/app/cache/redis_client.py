@@ -79,6 +79,19 @@ async def add_to_blacklist(merchant_id: str) -> None:
     await redis.sadd(BLACKLIST_KEY, merchant_id)
 
 
+async def seed_blacklist(merchant_ids: list[str]) -> None:
+    """
+    Bulk-load active blacklisted merchants from Postgres into Redis on startup.
+    Called once during lifespan initialisation so the set survives pod restarts.
+    """
+    if not merchant_ids:
+        logger.warning("Blacklist seed called with empty list — Redis set not updated.")
+        return
+    redis = await get_redis()
+    await redis.sadd(BLACKLIST_KEY, *merchant_ids)
+    logger.info(f"Blacklist seeded: {len(merchant_ids)} merchants loaded into Redis.")
+
+
 # ── User average spend helpers ────────────────────────────────────────────────
 
 AVG_SPEND_KEY_PREFIX = "user:avg_spend:"
